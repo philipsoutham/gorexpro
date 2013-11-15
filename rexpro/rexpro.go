@@ -68,15 +68,30 @@ type sendReceiveScriptMsgArg struct {
 }
 
 type Session interface {
+	// Begin starts a new session on the rexpro server
 	Begin() error
+
+	// Close closes the session at the rexpro server while leaving the
+	// connection intact.
 	Close() error
+
+	// DoScript sends a command and bindings to the server and
+	// returns the received reply.
 	DoScript(string, map[string]interface{}) ([]interface{}, error)
 }
 
 type Conn interface {
+	// Closes the connection.
 	Close() error
+
+	// DoScript sends a command and bindings to the server and
+	// returns the received reply.
 	DoScript(string, map[string]interface{}) ([]interface{}, error)
+
+	// NewSession creates a new rexpro session handler
 	NewSession() (Session, error)
+
+	// NewAuthSession creates a new authenticated rexpro session handler
 	NewAuthSession(string, string) (Session, error)
 }
 
@@ -105,6 +120,7 @@ func DialTimeout(address string, graphName string, connectTimeout, readTimeout, 
 	return NewConn(c, address, readTimeout, writeTimeout), nil
 }
 
+// NewConn returns a new rexpro connection for the given net connection.
 func NewConn(netConn net.Conn, graphName string, readTimeout, writeTimeout time.Duration) Conn {
 	return &rexpro{
 		graphName:    graphName,
@@ -147,7 +163,6 @@ func (r *rexpro) DoScript(script string, bindings map[string]interface{}) (i []i
 	return
 }
 
-// Starts a new session on the rexpro server
 func (s *session) Begin() (err error) {
 	s.r.mu.Lock()
 	err = s.createOrKillSession(false)
@@ -189,7 +204,6 @@ func (s *session) createOrKillSession(kill bool) (err error) {
 	return
 }
 
-// Closes the session at the rexpro server while leaving the connection intact.
 func (s *session) Close() (err error) {
 	s.r.mu.Lock()
 	err = s.createOrKillSession(true)
