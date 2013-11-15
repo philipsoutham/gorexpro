@@ -173,14 +173,14 @@ func (c *pooledConnection) DoScript(script string, bindings map[string]interface
 	return c.c.DoScript(script, bindings)
 }
 
-func (c *pooledConnection) NewSession() (*Session, error) {
+func (c *pooledConnection) NewSession() (Session, error) {
 	if err := c.get(); err != nil {
 		return nil, err
 	}
 	return c.c.NewSession()
 }
 
-func (c *pooledConnection) NewAuthSession(username, password string) (*Session, error) {
+func (c *pooledConnection) NewAuthSession(username, password string) (Session, error) {
 	if err := c.get(); err != nil {
 		return nil, err
 	}

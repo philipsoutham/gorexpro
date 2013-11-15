@@ -24,8 +24,8 @@ import (
 	"github.com/ugorji/go/codec"
 	"net"
 	"reflect"
-	"strconv"
 	"sync"
+	"time"
 )
 
 // Message Definitions
@@ -40,23 +40,24 @@ const (
 var (
 	defaultSendHeader = [...]byte{
 		1,          // protocol version
-		0,          // serializer type
+		0,          // serializer type (msgpack)
 		0, 0, 0, 0, // reserved
 	}
 	sessionlessUuid = [...]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	//DecodingError   = errors.New("rexpro: msgpack decode error")
 )
 
-type RexPro struct {
-	GraphName string
-	conn      net.Conn
-	mu        sync.Mutex
-	rw        *bufio.ReadWriter
+type rexpro struct {
+	graphName    string
+	conn         net.Conn
+	mu           sync.Mutex
+	rw           *bufio.ReadWriter
+	readTimeout  time.Duration
+	writeTimeout time.Duration
 }
-type Session struct {
-	Username string
-	Password string
-	r        *RexPro
+type session struct {
+	username string
+	password string
+	r        *rexpro
 	sId      []byte
 }
 
@@ -66,46 +67,75 @@ type sendReceiveScriptMsgArg struct {
 	bindings map[string]interface{}
 }
 
+type Session interface {
+	Begin() error
+	Close() error
+	DoScript(string, map[string]interface{}) ([]interface{}, error)
+}
+
 type Conn interface {
 	Close() error
 	DoScript(string, map[string]interface{}) ([]interface{}, error)
-	NewSession() (*Session, error)
-	NewAuthSession(string, string) (*Session, error)
+	NewSession() (Session, error)
+	NewAuthSession(string, string) (Session, error)
 }
 
-func NewConnection(host string, port int, graphName string) (*RexPro, error) {
-	conn, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+// Dial connects to the rexpro server
+func Dial(address string, graphName string) (Conn, error) {
+	c, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, err
 	}
-	return &RexPro{
-		GraphName: graphName,
-		conn:      conn,
-		rw:        bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)),
-	}, nil
+	return NewConn(c, graphName, 0, 0), nil
 }
 
-func (r *RexPro) NewSession() (*Session, error) {
-	return &Session{r: r, sId: sessionlessUuid[:]}, nil
+// DialTimeout acts like Dial but takes timeouts for establishing the
+// connection to the server, writing a command and reading a reply.
+func DialTimeout(address string, graphName string, connectTimeout, readTimeout, writeTimeout time.Duration) (Conn, error) {
+	var c net.Conn
+	var err error
+	if connectTimeout > 0 {
+		c, err = net.DialTimeout("tcp", address, connectTimeout)
+	} else {
+		c, err = net.Dial("tcp", address)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return NewConn(c, address, readTimeout, writeTimeout), nil
 }
 
-func (r *RexPro) NewAuthSession(username, password string) (*Session, error) {
-	return &Session{
+func NewConn(netConn net.Conn, graphName string, readTimeout, writeTimeout time.Duration) Conn {
+	return &rexpro{
+		graphName:    graphName,
+		conn:         netConn,
+		rw:           bufio.NewReadWriter(bufio.NewReader(netConn), bufio.NewWriter(netConn)),
+		readTimeout:  readTimeout,
+		writeTimeout: writeTimeout,
+	}
+}
+
+func (r *rexpro) NewSession() (Session, error) {
+	return &session{r: r, sId: sessionlessUuid[:]}, nil
+}
+
+func (r *rexpro) NewAuthSession(username, password string) (Session, error) {
+	return &session{
 		r:        r,
 		sId:      sessionlessUuid[:],
-		Username: username,
-		Password: password,
+		username: username,
+		password: password,
 	}, nil
 }
 
-func (r *RexPro) Close() (err error) {
+func (r *rexpro) Close() (err error) {
 	r.mu.Lock()
 	err = r.conn.Close()
 	r.mu.Unlock()
 	return
 }
 
-func (r *RexPro) DoScript(script string, bindings map[string]interface{}) (i []interface{}, e error) {
+func (r *rexpro) DoScript(script string, bindings map[string]interface{}) (i []interface{}, e error) {
 	r.mu.Lock()
 	args := &sendReceiveScriptMsgArg{
 		sessionlessUuid[:],
@@ -117,14 +147,15 @@ func (r *RexPro) DoScript(script string, bindings map[string]interface{}) (i []i
 	return
 }
 
-func (s *Session) Begin() (err error) {
+// Starts a new session on the rexpro server
+func (s *session) Begin() (err error) {
 	s.r.mu.Lock()
 	err = s.createOrKillSession(false)
 	s.r.mu.Unlock()
 	return
 }
 
-func (s *Session) createOrKillSession(kill bool) (err error) {
+func (s *session) createOrKillSession(kill bool) (err error) {
 	s.r.rw.Writer.Write(defaultSendHeader[:])
 	s.r.rw.Writer.WriteByte(byte(SESSION_REQUEST))
 	msgBody, err := s.sessionBody(kill)
@@ -158,14 +189,15 @@ func (s *Session) createOrKillSession(kill bool) (err error) {
 	return
 }
 
-func (s *Session) Close() (err error) {
+// Closes the session at the rexpro server while leaving the connection intact.
+func (s *session) Close() (err error) {
 	s.r.mu.Lock()
 	err = s.createOrKillSession(true)
 	s.r.mu.Unlock()
 	return
 }
 
-func (s *Session) DoScript(script string, bindings map[string]interface{}) (i []interface{}, e error) {
+func (s *session) DoScript(script string, bindings map[string]interface{}) (i []interface{}, e error) {
 	s.r.mu.Lock()
 	args := &sendReceiveScriptMsgArg{
 		s.sId,
@@ -177,7 +209,7 @@ func (s *Session) DoScript(script string, bindings map[string]interface{}) (i []
 	return
 }
 
-func (r *RexPro) writeMsg(msgType int8, body []byte) (err error) {
+func (r *rexpro) writeMsg(msgType int8, body []byte) (err error) {
 	var c = 0
 	if c, err = r.rw.Writer.Write(defaultSendHeader[:]); err == nil && c == len(defaultSendHeader) {
 		if err = r.rw.Writer.WriteByte(byte(msgType)); err == nil {
@@ -198,7 +230,7 @@ func (r *RexPro) writeMsg(msgType int8, body []byte) (err error) {
 	return
 }
 
-func (r *RexPro) readMsg(expectedMsgType int8) ([]interface{}, error) {
+func (r *rexpro) readMsg(expectedMsgType int8) ([]interface{}, error) {
 	respHeader := make([]byte, 11)
 	if c, err := r.rw.Reader.Read(respHeader); err != nil || c != 11 {
 		return nil, fmt.Errorf("rexpro: read header -> only read %d bytes out of 11", c)
@@ -219,8 +251,8 @@ func (r *RexPro) readMsg(expectedMsgType int8) ([]interface{}, error) {
 	return resp, nil
 }
 
-func (r *RexPro) sendReceiveScriptMsg(a *sendReceiveScriptMsgArg) ([]interface{}, error) {
-	msgBody, err := scriptBody(a.sId, r.GraphName, a.script, a.bindings)
+func (r *rexpro) sendReceiveScriptMsg(a *sendReceiveScriptMsgArg) ([]interface{}, error) {
+	msgBody, err := scriptBody(a.sId, r.graphName, a.script, a.bindings)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +262,7 @@ func (r *RexPro) sendReceiveScriptMsg(a *sendReceiveScriptMsgArg) ([]interface{}
 	return r.readMsg(SCRIPT_RESPONSE)
 }
 
-func (s *Session) sessionBody(kill bool) (out []byte, err error) {
+func (s *session) sessionBody(kill bool) (out []byte, err error) {
 	var (
 		mh    = new(codec.MsgpackHandle)
 		enc   = codec.NewEncoderBytes(&out, mh)
@@ -241,12 +273,12 @@ func (s *Session) sessionBody(kill bool) (out []byte, err error) {
 		s.sId,
 		reqId[:],
 		map[string]interface{}{
-			"graphName":    s.r.GraphName,
+			"graphName":    s.r.graphName,
 			"graphObjName": "g",
 			"killSession":  kill,
 		},
-		s.Username,
-		s.Password,
+		s.username,
+		s.password,
 	})
 	return
 }
@@ -260,8 +292,8 @@ func scriptBody(sessionId []byte, graphName, script string, bindings map[string]
 	)
 	mh.MapType = reflect.TypeOf(map[string]interface{}(nil))
 	meta := map[string]interface{}{
-		"inSession":    false, //!isSessionless,
-		"isolate":      true,  //isSessionless,
+		"inSession":    !isSessionless,
+		"isolate":      isSessionless,
 		"graphObjName": "g",
 	}
 	if isSessionless {
