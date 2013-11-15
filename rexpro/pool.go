@@ -23,20 +23,79 @@ import (
 
 var nowFunc = time.Now
 
+// ErrPoolExhausted is returned from pool connection methods when the maximum
+// number of database connections in the pool has been reached.
 var ErrPoolExhausted = errors.New("gorexpro: connection pool exhausted")
 
 var errPoolClosed = errors.New("gorexpro: connection pool closed")
 
+// Pool maintains a pool of connections. The application calls the Get method
+// to get a connection from the pool and the connection's Close method to
+// return the connection's resources to the pool.
+//
+// The following example shows how to use a pool in your application. The
+// application creates a pool at application startup and makes it available to
+// request handlers, possibly using a global variable:
+//
+//      var server string           // host:port of server
+//      var graphName string        // name of graph
+//      ...
+//
+//      pool = &rexpro.Pool{
+//              MaxIdle: 3,
+//              IdleTimeout: 240 * time.Second,
+//              Dial: func () (rexpro.Conn, error) {
+//                  c, err := rexpro.Dial(server, graphName)
+//                  if err != nil {
+//                      return nil, err
+//                  }
+//                  return c, err
+//              },
+//				TestOnBorrow: func(c rexpro.Conn, t time.Time) error {
+//				    _, err := c.DoScript("1")
+//                  return err
+//			    },
+//          }
+//
+// This pool has a maximum of three connections to the server specified by the
+// variable "server". Each connection is authenticated using a password.
+//
+// A request handler gets a connection from the pool and closes the connection
+// when the handler is done:
+//
+//  conn := pool.Get()
+//  defer conn.Close()
+//  // do something with the connection
 type Pool struct {
-	Dial         func() (Conn, error)
+	// Dial is an application supplied function for creating new connections.
+	Dial func() (Conn, error)
+
+	// TestOnBorrow is an optional application supplied function for checking
+	// the health of an idle connection before the connection is used again by
+	// the application. Argument t is the time that the connection was returned
+	// to the pool. If the function returns an error, then the connection is
+	// closed.
 	TestOnBorrow func(c Conn, t time.Time) error
-	MaxIdle      int
-	MaxActive    int
-	IdleTimeout  time.Duration
-	mu           sync.Mutex
-	closed       bool
-	active       int
-	idle         list.List
+
+	// Maximum number of idle connections in the pool.
+	MaxIdle int
+
+	// Maximum number of connections allocated by the pool at a given time.
+	// When zero, there is no limit on the number of connections in the pool.
+	MaxActive int
+
+	// Close connections after remaining idle for this duration. If the value
+	// is zero, then idle connections are not closed. Applications should set
+	// the timeout to a value less than the server's timeout.
+	IdleTimeout time.Duration
+
+	// mu protects fields defined below.
+	mu     sync.Mutex
+	closed bool
+	active int
+
+	// Stack of idleConn with most recently used at the front.
+	idle list.List
 }
 
 type idleConn struct {
@@ -44,14 +103,18 @@ type idleConn struct {
 	t time.Time
 }
 
+// NewPool returns a pool that uses newPool to create connections as needed.
+// The pool keeps a maximum of maxIdle idle connections.
 func NewPool(newFn func() (Conn, error), maxIdle int) *Pool {
 	return &Pool{Dial: newFn, MaxIdle: maxIdle}
 }
 
+// Get gets a connection from the pool.
 func (p *Pool) Get() Conn {
 	return &pooledConnection{p: p}
 }
 
+// ActiveCount returns the number of active connections in the pool.
 func (p *Pool) ActiveCount() int {
 	p.mu.Lock()
 	active := p.active
@@ -59,6 +122,7 @@ func (p *Pool) ActiveCount() int {
 	return active
 }
 
+// Close releases the resources used by the pool.
 func (p *Pool) Close() error {
 	p.mu.Lock()
 	idle := p.idle
@@ -72,6 +136,8 @@ func (p *Pool) Close() error {
 	return nil
 }
 
+// get prunes stale connections and returns a connection from the idle list or
+// creates a new connection.
 func (p *Pool) get() (Conn, error) {
 	p.mu.Lock()
 
@@ -79,6 +145,8 @@ func (p *Pool) get() (Conn, error) {
 		p.mu.Unlock()
 		return nil, errors.New("rexpro: get on closed pool")
 	}
+
+	// Prune stale connections.
 
 	if timeout := p.IdleTimeout; timeout > 0 {
 		for i, n := 0, p.idle.Len(); i < n; i++ {
@@ -97,6 +165,8 @@ func (p *Pool) get() (Conn, error) {
 			p.mu.Lock()
 		}
 	}
+
+	// Get idle connection.
 
 	for i, n := 0, p.idle.Len(); i < n; i++ {
 		e := p.idle.Front()
@@ -119,6 +189,8 @@ func (p *Pool) get() (Conn, error) {
 		p.mu.Unlock()
 		return nil, ErrPoolExhausted
 	}
+
+	// No idle connection, create new.
 
 	dial := p.Dial
 	p.active += 1
