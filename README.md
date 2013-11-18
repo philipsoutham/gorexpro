@@ -65,6 +65,13 @@ func main() {
 
 Polishing them now, so coming soon (~~hopefully~~ er, maybe)
 
+
+## Things you should probably be aware of...
+Right now, some assumptions are made in regards to the `isolate` parameter in the [script request `Meta` map](https://github.com/tinkerpop/rexster/wiki/RexPro-Messages#session); 
+that is to say that if you are in a "session", `isolate` will be set to `false` and `inSession` will be set to `true`. 
+If you're not in a "session" the inverse will be applied. Also, the `graphObjName` parameter is always hardcoded to `"g"`.
+
+
 ## Thanks
-to @garyburd as I copied much of the API he created for his excellent [redigo](https://github.com/garyburd/redigo) 
+to @garyburd as I have copied much of the API he created for his excellent [redigo](https://github.com/garyburd/redigo) 
 redis client and will be also leveraging his hard work for the unit tests as well.
