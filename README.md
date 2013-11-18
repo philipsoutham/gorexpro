@@ -73,5 +73,5 @@ If you're not in a "session" the inverse will be applied. Also, the `graphObjNam
 
 
 ## Thanks
-to @garyburd as I have copied much of the API he created for his excellent [redigo](https://github.com/garyburd/redigo) 
+to [@garyburd](https://github.com/garyburd) as I have copied much of the API he created for his excellent [redigo](https://github.com/garyburd/redigo) 
 redis client and will be also leveraging his hard work for the unit tests as well.
