@@ -22,19 +22,30 @@ import (
 	"fmt"
 	"github.com/go-contrib/uuid"
 	"github.com/ugorji/go/codec"
+	"io"
 	"net"
 	"reflect"
 	"sync"
 	"time"
 )
 
+type MessageType byte
+type SerializerType byte
+
+// Serializer Definitions
+const (
+	MSGPACK MessageType = iota
+	JSON
+)
+
 // Message Definitions
 const (
-	SESSION_REQUEST  int8 = 1
-	SESSION_RESPONSE int8 = 2
-	SCRIPT_REQUEST   int8 = 3
-	SCRIPT_RESPONSE  int8 = 5
-	ERROR            int8 = 0
+	ERROR MessageType = iota
+	SESSION_REQUEST
+	SESSION_RESPONSE
+	SCRIPT_REQUEST
+	_
+	SCRIPT_RESPONSE
 )
 
 var (
@@ -45,6 +56,14 @@ var (
 	}
 	sessionlessUuid = [...]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 )
+
+type msgHeader struct {
+	Version        byte
+	SerializerType byte
+	Reserved       [4]byte
+	MessageType    MessageType
+	BodySize       uint32
+}
 
 type rexpro struct {
 	graphName    string
@@ -181,15 +200,14 @@ func (s *session) createOrKillSession(kill bool) (err error) {
 	s.r.rw.Writer.Write(msgBody)
 	s.r.rw.Writer.Flush()
 
-	respHeader := make([]byte, 11)
-	if c, err := s.r.rw.Reader.Read(respHeader); err != nil || c != 11 {
-		return fmt.Errorf("rexpro: read header -> only read %d bytes out of 11", c)
+	var h = new(msgHeader)
+	if err = binary.Read(s.r.rw.Reader, binary.BigEndian, h); err != nil {
+		return
 	}
-	respMsgType, respMsgSize := parseHeader(respHeader)
 
-	respMsg := make([]byte, respMsgSize)
-	if c, err := s.r.rw.Reader.Read(respMsg); err != nil || c != respMsgSize {
-		return fmt.Errorf("rexpro: read body -> only read %d bytes out of %d", c, respMsgSize)
+	respMsg := make([]byte, h.BodySize)
+	if c, err := io.ReadFull(s.r.rw.Reader, respMsg); err != nil || uint32(c) != h.BodySize {
+		return fmt.Errorf("rexpro: read body -> only read %d bytes out of %d, %s", c, h.BodySize, err)
 	}
 
 	resp, err := decodeBody(respMsg)
@@ -198,8 +216,8 @@ func (s *session) createOrKillSession(kill bool) (err error) {
 	}
 	s.sId = (resp[0].([]byte))
 
-	if respMsgType != SESSION_RESPONSE {
-		err = fmt.Errorf("rexpro: Got msg type %d, expecting %d", respMsgType, SESSION_RESPONSE)
+	if h.MessageType != SESSION_RESPONSE {
+		err = fmt.Errorf("rexpro: Got msg type %d, expecting %d", h.MessageType, SESSION_RESPONSE)
 	}
 	return
 }
@@ -223,7 +241,7 @@ func (s *session) DoScript(script string, bindings map[string]interface{}) (i []
 	return
 }
 
-func (r *rexpro) writeMsg(msgType int8, body []byte) (err error) {
+func (r *rexpro) writeMsg(msgType MessageType, body []byte) (err error) {
 	var c = 0
 	if c, err = r.rw.Writer.Write(defaultSendHeader[:]); err == nil && c == len(defaultSendHeader) {
 		if err = r.rw.Writer.WriteByte(byte(msgType)); err == nil {
@@ -244,23 +262,27 @@ func (r *rexpro) writeMsg(msgType int8, body []byte) (err error) {
 	return
 }
 
-func (r *rexpro) readMsg(expectedMsgType int8) ([]interface{}, error) {
-	respHeader := make([]byte, 11)
-	if c, err := r.rw.Reader.Read(respHeader); err != nil || c != 11 {
-		return nil, fmt.Errorf("rexpro: read header -> only read %d bytes out of 11", c)
+func (r *rexpro) readMsg(expectedMsgType MessageType) ([]interface{}, error) {
+	var h = new(msgHeader)
+	if err := binary.Read(r.rw.Reader, binary.BigEndian, h); err != nil {
+		return nil, err
 	}
 
-	respMsgType, respMsgSize := parseHeader(respHeader)
-	respMsg := make([]byte, respMsgSize)
-	if c, err := r.rw.Reader.Read(respMsg); err != nil || c != respMsgSize {
-		return nil, fmt.Errorf("rexpro: read body -> only read %d bytes out of %d", c, respMsgSize)
+	respMsg := make([]byte, h.BodySize)
+	if c, err := io.ReadFull(r.rw.Reader, respMsg); err != nil || uint32(c) != h.BodySize {
+		return nil, fmt.Errorf("rexpro: read body -> only read %d bytes out of %d, %s", c, h.BodySize, err)
 	}
-	resp, err := decodeBody(respMsg[:])
+
+	resp, err := decodeBody(respMsg)
 	if err != nil {
 		return nil, err
 	}
-	if respMsgType != expectedMsgType {
-		return nil, fmt.Errorf("rexpro: Got msg type %d, expected %d", respMsgType, expectedMsgType)
+	if h.MessageType != expectedMsgType {
+		msg := "That's all I know."
+		if h.MessageType == ERROR {
+			msg = string(resp[3].([]byte))
+		}
+		return nil, fmt.Errorf("rexpro: Got msg type %d, expected %d\n%s", h.MessageType, expectedMsgType, msg)
 	}
 	return resp, nil
 }
@@ -324,9 +346,9 @@ func scriptBody(sessionId []byte, graphName, script string, bindings map[string]
 	return
 }
 
-func byte2int(val []byte) int {
-	return (int(val[0])<<24)&0xFF000000 | (int(val[1])<<16)&0xFF0000 | (int(val[2])<<8)&0xFF00 | (int(val[3])<<0)&0xFF
-}
+// func byte2int(val []byte) int {
+// 	return (int(val[0])<<24)&0xFF000000 | (int(val[1])<<16)&0xFF0000 | (int(val[2])<<8)&0xFF00 | (int(val[3])<<0)&0xFF
+// }
 
 func int2byte(val int) []byte {
 	return []byte{
@@ -336,10 +358,6 @@ func int2byte(val int) []byte {
 		byte(val >> 0 & 0xFF),
 	}
 
-}
-
-func parseHeader(header []byte) (int8, int) {
-	return int8(header[6]), byte2int(header[7:])
 }
 
 func decodeBody(body []byte) (retVal []interface{}, err error) {
