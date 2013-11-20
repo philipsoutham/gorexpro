@@ -61,7 +61,6 @@ func main() {
 
 
 ## Unit Tests
-![tests](http://cdn.memegenerator.net/instances/250x250/37708899.jpg)
 
 Polishing them now, so coming soon (~~hopefully~~ er, maybe)
 
